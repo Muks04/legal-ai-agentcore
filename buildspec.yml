@@ -1,0 +1,22 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 008714537357.dkr.ecr.us-east-1.amazonaws.com
+      - REPOSITORY_URI=008714537357.dkr.ecr.us-east-1.amazonaws.com/legal-ai-bot
+      - IMAGE_TAG=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+  build:
+    commands:
+      - echo Building Docker image...
+      - docker build -t $REPOSITORY_URI:$IMAGE_TAG .
+      - docker tag $REPOSITORY_URI:$IMAGE_TAG $REPOSITORY_URI:latest
+  post_build:
+    commands:
+      - echo Pushing Docker image...
+      - docker push $REPOSITORY_URI:$IMAGE_TAG
+      - docker push $REPOSITORY_URI:latest
+      - echo Updating Lambda function...
+      - aws lambda update-function-code --function-name legal-ai-bot-prod --image-uri $REPOSITORY_URI:$IMAGE_TAG --region us-east-1
+      - echo Deploy complete.

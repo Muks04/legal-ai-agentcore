@@ -1,0 +1,270 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Legal AI Bot - Infrastructure for Indian Litigation Lawyers (WhatsApp-native)
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, prod]
+  AccountId:
+    Type: String
+    Default: '008714537357'
+
+Resources:
+  # ============================================================
+  # DynamoDB Tables
+  # ============================================================
+
+  CasesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'legal-cases-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: caseId
+          AttributeType: S
+        - AttributeName: lawyerPhone
+          AttributeType: S
+        - AttributeName: caseNumber
+          AttributeType: S
+      KeySchema:
+        - AttributeName: caseId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: lawyer-cases-index
+          KeySchema:
+            - AttributeName: lawyerPhone
+              KeyType: HASH
+            - AttributeName: caseNumber
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Project
+          Value: Legal-AI-Bot
+
+  ChatHistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'legal-chat-history-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: phone
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: phone
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Project
+          Value: Legal-AI-Bot
+
+  ResearchTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'legal-research-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: queryId
+          AttributeType: S
+        - AttributeName: lawyerPhone
+          AttributeType: S
+      KeySchema:
+        - AttributeName: queryId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: lawyer-research-index
+          KeySchema:
+            - AttributeName: lawyerPhone
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Project
+          Value: Legal-AI-Bot
+
+  DraftsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'legal-drafts-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: draftId
+          AttributeType: S
+        - AttributeName: lawyerPhone
+          AttributeType: S
+      KeySchema:
+        - AttributeName: draftId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: lawyer-drafts-index
+          KeySchema:
+            - AttributeName: lawyerPhone
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Project
+          Value: Legal-AI-Bot
+
+  # ============================================================
+  # S3 Buckets
+  # ============================================================
+
+  # JudgmentsBucket already created manually (legal-ai-judgments-008714537357)
+  # Referenced by name in Lambda environment variables
+
+  DraftsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'legal-ai-drafts-${AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldDrafts
+            Status: Enabled
+            ExpirationInDays: 90
+      Tags:
+        - Key: Project
+          Value: Legal-AI-Bot
+
+  # ============================================================
+  # IAM Role for Lambda
+  # ============================================================
+
+  LegalBotLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'legal-ai-bot-lambda-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LegalBotDynamoDB
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource:
+                  - !GetAtt CasesTable.Arn
+                  - !Sub '${CasesTable.Arn}/index/*'
+                  - !GetAtt ChatHistoryTable.Arn
+                  - !GetAtt ResearchTable.Arn
+                  - !Sub '${ResearchTable.Arn}/index/*'
+                  - !GetAtt DraftsTable.Arn
+                  - !Sub '${DraftsTable.Arn}/index/*'
+        - PolicyName: LegalBotS3
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::legal-ai-judgments-${AccountId}'
+                  - !Sub 'arn:aws:s3:::legal-ai-judgments-${AccountId}/*'
+                  - !GetAtt DraftsBucket.Arn
+                  - !Sub '${DraftsBucket.Arn}/*'
+        - PolicyName: LegalBotBedrock
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: '*'
+
+  # ============================================================
+  # Lambda Function
+  # ============================================================
+
+  LegalBotFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'legal-ai-bot-${Environment}'
+      Runtime: python3.12
+      Handler: legal_orchestrator.lambda_handler
+      Role: !GetAtt LegalBotLambdaRole.Arn
+      Timeout: 60
+      MemorySize: 512
+      Code:
+        S3Bucket: !Sub 'legal-ai-judgments-${AccountId}'
+        S3Key: 'lambda-code/legal-ai-bot.zip'
+      Environment:
+        Variables:
+          CASES_TABLE: !Ref CasesTable
+          CHAT_HISTORY_TABLE: !Ref ChatHistoryTable
+          RESEARCH_TABLE: !Ref ResearchTable
+          DRAFTS_TABLE: !Ref DraftsTable
+          JUDGMENTS_BUCKET: !Sub 'legal-ai-judgments-${AccountId}'
+          DRAFTS_BUCKET: !Ref DraftsBucket
+          ENVIRONMENT: !Ref Environment
+      Tags:
+        - Key: Project
+          Value: Legal-AI-Bot
+
+  LegalBotFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt LegalBotFunction.Arn
+      AuthType: NONE
+
+  LegalBotFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LegalBotFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: '*'
+      FunctionUrlAuthType: NONE
+
+Outputs:
+  CasesTableName:
+    Value: !Ref CasesTable
+  ChatHistoryTableName:
+    Value: !Ref ChatHistoryTable
+  ResearchTableName:
+    Value: !Ref ResearchTable
+  DraftsTableName:
+    Value: !Ref DraftsTable
+  JudgmentsBucketName:
+    Value: !Sub 'legal-ai-judgments-${AccountId}'
+  DraftsBucketName:
+    Value: !Ref DraftsBucket
+  LambdaRoleArn:
+    Value: !GetAtt LegalBotLambdaRole.Arn
+  LambdaFunctionArn:
+    Value: !GetAtt LegalBotFunction.Arn
+  FunctionUrl:
+    Value: !GetAtt LegalBotFunctionUrl.FunctionUrl
